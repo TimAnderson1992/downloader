@@ -48,6 +48,13 @@ DEFAULT_DIRECT_URLS = [
     "https://download.kiwix.org/release/kiwix-desktop/",
 ]
 
+DEFAULT_GITHUB_RELEASES = [
+    {
+        "name": "Linux Mint Task Manager DEB",
+        "url": "https://github.com/TimAnderson1992/LinuxMintTaskManager/releases/tag/Release",
+    }
+]
+
 
 def default_items():
     items = []
@@ -55,6 +62,15 @@ def default_items():
         items.append({"enabled": True, "type": "github", "url": url})
     for url in DEFAULT_DIRECT_URLS:
         items.append({"enabled": True, "type": "direct", "url": url})
+    for release in DEFAULT_GITHUB_RELEASES:
+        items.append(
+            {
+                "enabled": True,
+                "name": release["name"],
+                "type": "github_release",
+                "url": release["url"],
+            }
+        )
     items.append(
         {
             "enabled": True,
@@ -286,6 +302,12 @@ def direct_category_and_name(url, filename):
     return "packages", clean_folder_name(Path(filename).stem)
 
 
+def github_release_folder(save_root, url):
+    if "TimAnderson1992/LinuxMintTaskManager" in url:
+        return Path(save_root) / "packages" / "linux-mint-task-manager"
+    return Path(save_root) / "packages" / clean_folder_name(Path(urllib.parse.urlparse(url).path).parts[-3])
+
+
 def direct_folder(save_root, url, filename):
     category, download_name = direct_category_and_name(url, filename)
     return Path(save_root) / category / download_name
@@ -337,8 +359,14 @@ STATUS_PREFIXES = (
 def item_display_name(item):
     item_type = item.get("type", "direct")
     url = item.get("url", "")
+    if item.get("name"):
+        return item["name"]
     if item_type == "github":
         return repo_name(url)
+    if item_type == "github_release":
+        if "TimAnderson1992/LinuxMintTaskManager" in url:
+            return "Linux Mint Task Manager DEB"
+        return f"{repo_name(url)} release"
     if item_type == "linuxmint_iso" or is_linuxmint_download_page(url):
         return "Linux Mint Cinnamon ISO"
     if "visualstudio.com/sha/download" in url:
@@ -394,6 +422,11 @@ class Downloader:
                 self.dry_run_linuxmint_iso()
             else:
                 self.download_linuxmint_iso()
+        elif item_type == "github_release":
+            if self.dry_run:
+                self.dry_run_github_release(item["url"])
+            else:
+                self.download_github_release(item["url"])
 
     def sync_github(self, url):
         target = self.save_root / "github" / repo_name(url)
@@ -538,6 +571,78 @@ class Downloader:
                         return
 
             self.status(f"Skipped — already current: {filename}")
+
+    def download_github_release(self, url):
+        asset = self.github_release_deb_asset(url)
+        filename = asset["name"]
+        out_dir = github_release_folder(self.save_root, url)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        final_path = out_dir / filename
+
+        if final_path.exists():
+            self.status(f"Updating — newer version found: {filename}")
+        else:
+            self.status(f"Downloading — missing: {filename}")
+
+        request = urllib.request.Request(asset["download_url"], headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            changed = self.download_to_temp_and_compare(response, final_path)
+
+        if changed:
+            self.status(f"Complete: {filename}")
+            self.trim_versions(out_dir, "*.deb", keep=1)
+        else:
+            self.status(f"Skipped — already current: {filename}")
+
+    def dry_run_github_release(self, url):
+        asset = self.github_release_deb_asset(url)
+        filename = asset["name"]
+        final_path = github_release_folder(self.save_root, url) / filename
+        if final_path.exists():
+            self.status(f"Skipped — already current: {filename}")
+        else:
+            self.status(f"Downloading — missing: {filename}")
+
+    def github_release_deb_asset(self, release_url):
+        api_url = self.github_release_api_url(release_url)
+        try:
+            request = urllib.request.Request(api_url, headers={"User-Agent": APP_NAME})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            assets = data.get("assets", [])
+            deb_assets = [
+                asset for asset in assets
+                if asset.get("name", "").endswith(".deb") and asset.get("browser_download_url")
+            ]
+            if deb_assets:
+                asset = sorted(deb_assets, key=lambda item: natural_key(item["name"]))[-1]
+                self.status(f"Found GitHub release asset: {asset['name']}")
+                return {"name": asset["name"], "download_url": asset["browser_download_url"]}
+        except Exception:
+            pass
+
+        html = self.read_url(release_url)
+        matches = re.findall(
+            r'href=["\']([^"\']+/releases/download/[^"\']+\.deb)["\']',
+            html,
+        )
+        if not matches:
+            raise RuntimeError("Could not detect a .deb release asset")
+        asset_url = urllib.parse.urljoin(release_url, sorted(set(matches), key=natural_key)[-1])
+        filename = Path(urllib.parse.urlparse(asset_url).path).name
+        self.status(f"Found GitHub release asset: {filename}")
+        return {"name": filename, "download_url": asset_url}
+
+    def github_release_api_url(self, release_url):
+        parsed = urllib.parse.urlparse(release_url)
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 5 and parts[2] == "releases" and parts[3] == "tag":
+            owner, repo, tag = parts[0], parts[1], parts[4]
+            return f"https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}"
+        if len(parts) >= 2:
+            owner, repo = parts[0], parts[1]
+            return f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+        raise RuntimeError("Invalid GitHub release URL")
 
     def download_to_temp_and_compare(self, response, final_path):
         total = response.headers.get("Content-Length")
@@ -871,7 +976,10 @@ class OfflineDownloaderApp(Gtk.Window):
     def config_from_ui(self):
         items = []
         for row in self.store:
-            items.append({"enabled": bool(row[COL_ENABLED]), "type": row[COL_TYPE], "url": row[COL_URL]})
+            item = {"enabled": bool(row[COL_ENABLED]), "type": row[COL_TYPE], "url": row[COL_URL]}
+            if row[COL_TYPE] == "github_release":
+                item["name"] = row[COL_NAME]
+            items.append(item)
         self.config["items"] = items
         filename = self.folder_button.get_filename()
         if filename:
