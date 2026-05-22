@@ -237,18 +237,45 @@ def direct_filename(url, headers=None):
     return "downloaded-file"
 
 
-def direct_folder(save_root, url, filename):
+def clean_folder_name(name):
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")
+    return cleaned or "download"
+
+
+def direct_category_and_name(url, filename):
     lower = f"{url} {filename}".lower()
-    root = Path(save_root)
     if "visualstudio.com" in lower or "vscode" in lower:
-        return root / "vscode"
+        return "vscode", "vscode-stable"
     if filename.lower().endswith(".appimage") or "kiwix-desktop" in lower:
-        return root / "appimages"
+        if "kiwix" in lower:
+            return "appimages", "kiwix"
+        return "appimages", clean_folder_name(Path(filename).stem)
     if "firmware" in lower:
-        return root / "firmware"
+        return "firmware", clean_folder_name(Path(filename).stem)
     if filename.lower().endswith(".iso"):
-        return root / "isos"
-    return root / "packages"
+        return "isos", clean_folder_name(Path(filename).stem)
+    if "raspberrypi.org/imager" in lower or "raspberry-pi-imager" in lower or "imager_latest" in lower:
+        return "packages", "raspberry-pi-imager"
+    return "packages", clean_folder_name(Path(filename).stem)
+
+
+def direct_folder(save_root, url, filename):
+    category, download_name = direct_category_and_name(url, filename)
+    return Path(save_root) / category / download_name
+
+
+def legacy_direct_folder(save_root, url, filename):
+    category, _download_name = direct_category_and_name(url, filename)
+    return Path(save_root) / category
+
+
+def migrate_legacy_direct_file(save_root, url, filename, new_dir):
+    legacy_path = legacy_direct_folder(save_root, url, filename) / filename
+    new_path = new_dir / filename
+    if new_path.exists() or not legacy_path.exists() or legacy_path.parent == new_dir:
+        return
+    new_dir.mkdir(parents=True, exist_ok=True)
+    legacy_path.replace(new_path)
 
 
 def is_linuxmint_download_page(url):
@@ -374,6 +401,7 @@ class Downloader:
             filename = direct_filename(url, response.headers)
             out_dir = direct_folder(self.save_root, url, filename)
             out_dir.mkdir(parents=True, exist_ok=True)
+            migrate_legacy_direct_file(self.save_root, url, filename, out_dir)
             final_path = out_dir / filename
             if final_path.exists():
                 self.status(f"Updating — newer version found: {filename}")
@@ -409,12 +437,17 @@ class Downloader:
             filename = direct_filename(url, response.headers)
             out_dir = direct_folder(self.save_root, url, filename)
             final_path = out_dir / filename
+            legacy_path = legacy_direct_folder(self.save_root, url, filename) / filename
             if not final_path.exists():
+                if legacy_path.exists():
+                    self.status(f"Skipped — already current: {filename} exists in old location")
+                    return
                 self.status(f"Downloading — missing: {filename}")
                 return
 
+            check_path = final_path
             remote_size = response.headers.get("Content-Length")
-            local_size = final_path.stat().st_size
+            local_size = check_path.stat().st_size
             if remote_size and remote_size.isdigit() and int(remote_size) != local_size:
                 self.status(f"Updating — newer version found: {filename}")
                 return
@@ -424,7 +457,7 @@ class Downloader:
                 parsed = email.utils.parsedate(remote_modified)
                 if parsed:
                     remote_dt = datetime.datetime(*parsed[:6])
-                    local_dt = datetime.datetime.fromtimestamp(final_path.stat().st_mtime)
+                    local_dt = datetime.datetime.fromtimestamp(check_path.stat().st_mtime)
                     if remote_dt > local_dt:
                         self.status(f"Updating — newer version found: {filename}")
                         return
