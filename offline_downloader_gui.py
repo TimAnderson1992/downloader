@@ -162,6 +162,7 @@ def ensure_download_dirs(save_root):
         "vscode",
         "firmware",
         "appimages",
+        "zim",
     ]:
         (root / name).mkdir(parents=True, exist_ok=True)
     return root
@@ -407,6 +408,16 @@ def direct_filename(url, headers=None):
     return "downloaded-file"
 
 
+def estimated_direct_filename(url):
+    if is_kiwix_desktop_page(url):
+        return "kiwix-desktop.AppImage"
+    if "visualstudio.com/sha/download" in url:
+        return "vscode-stable-linux-deb-x64.deb"
+    parsed = urllib.parse.urlparse(url)
+    name = Path(parsed.path).name
+    return name or "downloaded-file"
+
+
 def clean_folder_name(name):
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")
     return cleaned or "download"
@@ -424,6 +435,8 @@ def direct_category_and_name(url, filename):
         return "firmware", clean_folder_name(Path(filename).stem)
     if filename.lower().endswith(".iso"):
         return "isos", clean_folder_name(Path(filename).stem)
+    if filename.lower().endswith(".zim"):
+        return "zim", clean_folder_name(Path(filename).stem)
     if "raspberrypi.org/imager" in lower or "raspberry-pi-imager" in lower or "imager_latest" in lower:
         return "packages", "raspberry-pi-imager"
     return "packages", clean_folder_name(Path(filename).stem)
@@ -438,6 +451,27 @@ def github_release_folder(save_root, url):
 def direct_folder(save_root, url, filename):
     category, download_name = direct_category_and_name(url, filename)
     return Path(save_root) / category / download_name
+
+
+def item_destination_folder(save_root, item_type, url):
+    root = Path(save_root).expanduser()
+    if item_type == "github":
+        return root / "github" / repo_name(url)
+    if item_type == "github_release":
+        return github_release_folder(root, url)
+    if item_type == "linuxmint_iso" or is_linuxmint_download_page(url):
+        return root / "isos" / "linuxmint"
+    return direct_folder(root, url, estimated_direct_filename(url))
+
+
+def nearest_existing_folder(path):
+    path = Path(path).expanduser()
+    current = path if path.is_dir() else path.parent
+    while current and current != current.parent:
+        if current.exists() and current.is_dir():
+            return current
+        current = current.parent
+    return current if current.exists() and current.is_dir() else None
 
 
 def legacy_direct_folder(save_root, url, filename):
@@ -1116,6 +1150,10 @@ class OfflineDownloaderApp(Gtk.Window):
         self.remove_button.connect("clicked", self.remove_selected)
         toolbar.pack_start(self.remove_button, False, False, 0)
 
+        self.open_folder_button = Gtk.Button(label="Open Folder")
+        self.open_folder_button.connect("clicked", self.open_selected_folder)
+        toolbar.pack_start(self.open_folder_button, False, False, 0)
+
         self.dry_run_button = Gtk.Button(label="Dry Run")
         self.dry_run_button.connect("clicked", self.start_dry_run)
         toolbar.pack_end(self.dry_run_button, False, False, 0)
@@ -1134,6 +1172,7 @@ class OfflineDownloaderApp(Gtk.Window):
         outer.pack_start(scroller, True, True, 0)
 
         self.tree = Gtk.TreeView(model=self.store)
+        self.tree.connect("button-press-event", self.on_tree_button_press)
         scroller.add(self.tree)
 
         enabled_renderer = Gtk.CellRendererToggle()
@@ -1278,6 +1317,50 @@ class OfflineDownloaderApp(Gtk.Window):
         if iterator:
             model.remove(iterator)
             self.save_from_ui()
+
+    def open_selected_folder(self, _button):
+        selection = self.tree.get_selection()
+        model, iterator = selection.get_selected()
+        if not iterator:
+            self.set_status("Folder not found: no download item selected")
+            return
+        self.open_folder_for_row(model[iterator])
+
+    def on_tree_button_press(self, tree, event):
+        if event.button != 3:
+            return False
+        path_info = tree.get_path_at_pos(int(event.x), int(event.y))
+        if path_info:
+            path, _column, _cell_x, _cell_y = path_info
+            tree.get_selection().select_path(path)
+        menu = Gtk.Menu()
+        open_item = Gtk.MenuItem(label="Open Folder")
+        open_item.connect("activate", self.open_selected_folder)
+        menu.append(open_item)
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def open_folder_for_row(self, row):
+        target = item_destination_folder(self.config["save_root"], row[COL_TYPE], row[COL_URL])
+        folder = nearest_existing_folder(target)
+        if not folder:
+            self.set_status(f"Folder not found: {target}")
+            return
+        self.set_status(f"Opening folder: {folder}")
+        try:
+            self.launch_folder(folder)
+        except Exception as exc:
+            self.set_status(f"Failed — could not open folder {folder}: {exc}")
+
+    def launch_folder(self, folder):
+        if sys.platform.startswith("win"):
+            cmd = ["explorer", str(folder)]
+        elif sys.platform == "darwin":
+            cmd = ["open", str(folder)]
+        else:
+            cmd = ["xdg-open", str(folder)]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def start_downloads(self, _button):
         self.start_queue(dry_run=False)
@@ -1493,6 +1576,7 @@ class OfflineDownloaderApp(Gtk.Window):
             self.add_github_button,
             self.add_direct_button,
             self.remove_button,
+            self.open_folder_button,
             self.download_button,
             self.dry_run_button,
             self.tree,
