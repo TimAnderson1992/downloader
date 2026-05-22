@@ -22,7 +22,7 @@ from gi.repository import GLib, Gtk
 
 
 APP_NAME = "Offline Downloader"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 APP_REPO_URL = "https://github.com/TimAnderson1992/downloader"
 APP_RELEASES_URL = f"{APP_REPO_URL}/releases"
 APP_LATEST_RELEASE_API = "https://api.github.com/repos/TimAnderson1992/downloader/releases/latest"
