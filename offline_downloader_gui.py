@@ -39,6 +39,7 @@ DEFAULT_REPOS = [
     "https://github.com/meshtastic/firmware.git",
     "https://github.com/meshtastic/python.git",
     "https://github.com/AvaloniaUI/Avalonia.git",
+    "https://github.com/MODSetter/SurfSense.git",
 ]
 
 DEFAULT_DIRECT_URLS = [
