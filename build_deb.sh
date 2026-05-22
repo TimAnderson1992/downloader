@@ -2,7 +2,25 @@
 
 set -euo pipefail
 
-VERSION="${VERSION:-1.0.0}"
+APP_VERSION="$(python3 - <<'PY'
+import ast
+from pathlib import Path
+
+tree = ast.parse(Path("offline_downloader_gui.py").read_text(encoding="utf-8"))
+for node in tree.body:
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "APP_VERSION":
+                print(ast.literal_eval(node.value))
+                raise SystemExit
+raise SystemExit("APP_VERSION not found")
+PY
+)"
+VERSION="${VERSION:-$APP_VERSION}"
+if [ "$VERSION" != "$APP_VERSION" ]; then
+  echo "VERSION ($VERSION) must match APP_VERSION ($APP_VERSION)" >&2
+  exit 1
+fi
 ARCH="amd64"
 PACKAGE="offline-downloader"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"

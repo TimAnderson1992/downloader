@@ -21,7 +21,10 @@ from gi.repository import GLib, Gtk
 
 
 APP_NAME = "Offline Downloader"
+APP_VERSION = "1.0.0"
 APP_REPO_URL = "https://github.com/TimAnderson1992/downloader"
+APP_RELEASES_URL = f"{APP_REPO_URL}/releases"
+APP_LATEST_RELEASE_API = "https://api.github.com/repos/TimAnderson1992/downloader/releases/latest"
 CONFIG_DIR = Path.home() / ".config" / "offline-downloader"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -296,6 +299,35 @@ def pull_app_update():
     if pull_result.returncode != 0:
         raise RuntimeError((pull_result.stderr or pull_result.stdout).strip())
     return pull_result.stdout.strip()
+
+
+def version_key(version):
+    version = version.lstrip("v")
+    return tuple(int(part) if part.isdigit() else 0 for part in re.split(r"[.-]", version))
+
+
+def latest_deb_release_status():
+    request = urllib.request.Request(APP_LATEST_RELEASE_API, headers={"User-Agent": APP_NAME})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    tag = data.get("tag_name", "")
+    release_version = tag.lstrip("v")
+    assets = data.get("assets", [])
+    deb_assets = [
+        asset for asset in assets
+        if asset.get("name", "").endswith("_amd64.deb") and asset.get("browser_download_url")
+    ]
+    deb_asset = sorted(deb_assets, key=lambda item: natural_key(item["name"]))[-1] if deb_assets else None
+
+    return {
+        "release_url": data.get("html_url", APP_RELEASES_URL),
+        "tag": tag,
+        "version": release_version,
+        "newer": version_key(release_version) > version_key(APP_VERSION),
+        "asset_name": deb_asset.get("name") if deb_asset else "",
+        "asset_url": deb_asset.get("browser_download_url") if deb_asset else "",
+    }
 
 
 def disable_user_timer():
@@ -1329,11 +1361,7 @@ class OfflineDownloaderApp(Gtk.Window):
         try:
             status = app_git_update_status()
             if not status.get("git_clone"):
-                self.show_info_dialog(
-                    "App update check",
-                    "This copy is not running from a git clone. Download package updates manually from https://github.com/TimAnderson1992/downloader.",
-                )
-                self.set_status("Complete: app update check finished")
+                self.check_deb_app_updates()
                 return
 
             if status.get("wrong_remote"):
@@ -1359,7 +1387,59 @@ class OfflineDownloaderApp(Gtk.Window):
             self.show_info_dialog("App update failed", str(exc))
             self.set_status(f"Failed — {exc}")
 
-    def ask_yes_no(self, title, message):
+    def check_deb_app_updates(self):
+        release = latest_deb_release_status()
+        base_message = (
+            "This copy was installed from a .deb package. App updates are checked from GitHub Releases, not git pull."
+        )
+        if not release["newer"]:
+            self.show_info_dialog(
+                "App update check",
+                f"{base_message}\n\nOffline Downloader is already current.\n\nInstalled version: {APP_VERSION}\nLatest release: {release['tag'] or 'unknown'}\n{release['release_url']}",
+            )
+            self.set_status("Offline Downloader is already current.")
+            return
+
+        asset_line = release["asset_url"] or release["release_url"]
+        message = (
+            f"{base_message}\n\n"
+            "A new .deb package is available.\n\n"
+            f"Installed version: {APP_VERSION}\n"
+            f"Latest release: {release['tag']}\n"
+            f"{asset_line}\n\n"
+            "Download the newer .deb into packages/offline-downloader/ under your selected save folder?"
+        )
+        if self.ask_yes_no("A new .deb package is available.", message, ok_label="Download"):
+            if not release["asset_url"]:
+                self.show_info_dialog("App update check", f"No .deb asset was found.\n\n{release['release_url']}")
+                self.set_status("Failed — no .deb release asset found")
+                return
+            self.download_app_deb_release(release["asset_url"], release["asset_name"])
+        else:
+            self.set_status("Complete: app .deb update skipped")
+
+    def download_app_deb_release(self, asset_url, asset_name):
+        self.save_from_ui()
+        out_dir = Path(self.config["save_root"]).expanduser() / "packages" / "offline-downloader"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        final_path = out_dir / asset_name
+        downloader = Downloader(
+            self.config["save_root"],
+            lambda text: GLib.idle_add(self.set_status, text),
+            lambda _fraction=None, pulse=False, detail="": None,
+            dry_run=False,
+        )
+        request = urllib.request.Request(asset_url, headers={"User-Agent": APP_NAME})
+        self.set_status(f"Downloading — missing: {asset_name}")
+        with urllib.request.urlopen(request, timeout=60) as response:
+            changed = downloader.download_to_temp_and_compare(response, final_path)
+        if changed:
+            downloader.trim_versions(out_dir, "*.deb", keep=1)
+            self.set_status(f"Complete: downloaded {final_path}")
+        else:
+            self.set_status(f"Skipped — already current: {asset_name}")
+
+    def ask_yes_no(self, title, message, ok_label="Update"):
         dialog = Gtk.MessageDialog(
             transient_for=self,
             flags=0,
@@ -1369,7 +1449,7 @@ class OfflineDownloaderApp(Gtk.Window):
         )
         dialog.format_secondary_text(message)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        dialog.add_button("Update", Gtk.ResponseType.OK)
+        dialog.add_button(ok_label, Gtk.ResponseType.OK)
         response = dialog.run()
         dialog.destroy()
         return response == Gtk.ResponseType.OK

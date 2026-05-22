@@ -80,6 +80,20 @@ After installing:
 offline-downloader
 ```
 
+## App Updates
+
+Use `Check for App Updates` in the GUI.
+
+When running from a git clone, the app checks `origin/main` and asks before running `git pull --ff-only` for this app repository only.
+
+When installed from a `.deb`, the app checks GitHub Releases. If a newer `.deb` is available, it shows the release or asset URL and can download the newer package into:
+
+```text
+packages/offline-downloader/
+```
+
+The app never installs updates automatically, runs `sudo`, runs `apt`, or updates Linux.
+
 ## Config
 
 User settings are stored locally at:
