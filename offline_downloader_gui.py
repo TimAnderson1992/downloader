@@ -837,14 +837,6 @@ class OfflineDownloaderApp(Gtk.Window):
         self.overall_progress_bar.set_show_text(True)
         status_box.pack_start(self.overall_progress_bar, False, False, 0)
 
-        self.current_item_label = Gtk.Label(label="Current item: none")
-        self.current_item_label.set_xalign(0)
-        status_box.pack_start(self.current_item_label, False, False, 0)
-
-        self.status_label = Gtk.Label(label="Ready")
-        self.status_label.set_xalign(0)
-        status_box.pack_start(self.status_label, False, False, 0)
-
         log_scroller = Gtk.ScrolledWindow()
         log_scroller.set_size_request(-1, 120)
         status_box.pack_start(log_scroller, False, True, 0)
@@ -1036,7 +1028,6 @@ class OfflineDownloaderApp(Gtk.Window):
         GLib.idle_add(self.finish_downloads, mark_scheduled)
 
     def set_status(self, text):
-        self.status_label.set_text(text)
         self.append_status_log(text)
         return False
 
@@ -1053,28 +1044,32 @@ class OfflineDownloaderApp(Gtk.Window):
         self.status_log.get_buffer().set_text("")
 
     def start_item_progress(self, row_index, name, index, total, dry_run):
-        self.current_item_label.set_text(f"Current item: {name}")
         self.update_overall_progress(index - 1, total)
         if self.valid_row_index(row_index):
             self.store[row_index][COL_STATUS] = "Checking"
             self.store[row_index][COL_PROGRESS_VALUE] = 0
-            self.store[row_index][COL_PROGRESS_TEXT] = "" if dry_run else "Working"
+            self.store[row_index][COL_PROGRESS_TEXT] = "" if dry_run else "Checking"
         self.active_row_index = row_index
         self.set_status(f"Checking: {name}")
         return False
 
     def set_item_status(self, row_index, text):
-        self.status_label.set_text(text)
         self.append_status_log(text)
         if self.valid_row_index(row_index) and is_row_status(text):
             self.store[row_index][COL_STATUS] = text
             if text.startswith("Complete") or text.startswith("Skipped"):
                 self.store[row_index][COL_PROGRESS_VALUE] = 100
-                self.store[row_index][COL_PROGRESS_TEXT] = "Done"
+                self.store[row_index][COL_PROGRESS_TEXT] = "Done" if text.startswith("Complete") else "Current"
             elif text.startswith("Failed"):
                 self.store[row_index][COL_PROGRESS_TEXT] = "Failed"
-            elif text.startswith("Downloading") or text.startswith("Updating") or text.startswith("Checking"):
-                self.store[row_index][COL_PROGRESS_TEXT] = "Working"
+            elif text.startswith("Downloading"):
+                self.store[row_index][COL_PROGRESS_VALUE] = max(self.store[row_index][COL_PROGRESS_VALUE], 5)
+                self.store[row_index][COL_PROGRESS_TEXT] = "Downloading"
+            elif text.startswith("Updating"):
+                self.store[row_index][COL_PROGRESS_VALUE] = max(self.store[row_index][COL_PROGRESS_VALUE], 5)
+                self.store[row_index][COL_PROGRESS_TEXT] = "Updating"
+            elif text.startswith("Checking"):
+                self.store[row_index][COL_PROGRESS_TEXT] = "Checking"
         return False
 
     def set_item_progress(self, row_index, fraction, pulse=False, detail="", dry_run=False):
@@ -1082,7 +1077,13 @@ class OfflineDownloaderApp(Gtk.Window):
             return False
         if pulse:
             if self.valid_row_index(row_index):
-                self.store[row_index][COL_PROGRESS_TEXT] = "Working"
+                status = self.store[row_index][COL_STATUS]
+                if str(status).startswith("Downloading"):
+                    self.store[row_index][COL_PROGRESS_TEXT] = "Downloading"
+                elif str(status).startswith("Updating"):
+                    self.store[row_index][COL_PROGRESS_TEXT] = "Updating"
+                else:
+                    self.store[row_index][COL_PROGRESS_TEXT] = "Checking"
         elif fraction is not None:
             fraction = max(0.0, min(1.0, float(fraction)))
             percent = int(fraction * 100)
@@ -1120,7 +1121,6 @@ class OfflineDownloaderApp(Gtk.Window):
         self.set_controls_sensitive(True)
         self.cancel_button.set_sensitive(False)
         self.active_row_index = None
-        self.current_item_label.set_text("Current item: none")
         self.set_status("Complete")
         return False
 
