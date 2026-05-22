@@ -4,6 +4,15 @@ Offline Downloader is a Linux Mint GTK app for maintaining offline backup copies
 
 The app is download-only. It does not install packages, run downloaded files, compile code, configure services, start containers, update Linux, or change system settings.
 
+## Download
+
+Clone the repo:
+
+```bash
+git clone https://github.com/TimAnderson1992/downloader.git
+cd downloader
+```
+
 ## Files
 
 - `offline_downloader_gui.py` - GTK GUI application.
