@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -22,6 +23,9 @@ from gi.repository import GLib, Gtk
 APP_NAME = "Offline Downloader"
 CONFIG_DIR = Path.home() / ".config" / "offline-downloader"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+SYSTEMD_SERVICE = SYSTEMD_USER_DIR / "offline-downloader.service"
+SYSTEMD_TIMER = SYSTEMD_USER_DIR / "offline-downloader.timer"
 
 DEFAULT_REPOS = [
     "https://github.com/TimAnderson1992/LinuxMintTaskManager.git",
@@ -65,6 +69,7 @@ def default_config():
             "hour": 2,
             "minute": 0,
         },
+        "last_scheduled_run_date": "",
         "items": items,
     }
 
@@ -96,6 +101,7 @@ def load_config():
     defaults = default_config()
     data.setdefault("save_root", defaults["save_root"])
     data.setdefault("monthly_schedule", defaults["monthly_schedule"])
+    data.setdefault("last_scheduled_run_date", "")
     data.setdefault("items", defaults["items"])
     data.pop("scheduled_days", None)
     return data
@@ -113,6 +119,97 @@ def save_config(config):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with CONFIG_FILE.open("w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
+
+
+def scheduled_download_due(config, now=None):
+    if now is None:
+        now = datetime.datetime.now()
+
+    schedule = config.get("monthly_schedule", {})
+    day = clamp(schedule.get("day"), 1, 28, 15)
+    hour = clamp(schedule.get("hour"), 0, 23, 2)
+    minute = clamp(schedule.get("minute"), 0, 59, 0)
+    today = now.date().isoformat()
+
+    if config.get("last_scheduled_run_date") == today:
+        return False
+    if now.day != day:
+        return False
+
+    scheduled_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return now >= scheduled_time
+
+
+def mark_scheduled_run_complete(config):
+    config["last_scheduled_run_date"] = datetime.date.today().isoformat()
+    save_config(config)
+
+
+def run_systemctl_user(args):
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def enable_user_timer():
+    script_path = Path(__file__).resolve()
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    SYSTEMD_SERVICE.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                "Description=Offline Downloader monthly scheduled check",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                f"ExecStart=/usr/bin/python3 {script_path} --scheduled-check",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    SYSTEMD_TIMER.write_text(
+        "\n".join(
+            [
+                "[Unit]",
+                "Description=Run Offline Downloader scheduled check",
+                "",
+                "[Timer]",
+                "OnCalendar=hourly",
+                "Persistent=true",
+                "Unit=offline-downloader.service",
+                "",
+                "[Install]",
+                "WantedBy=timers.target",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    daemon = run_systemctl_user(["daemon-reload"])
+    if daemon.returncode != 0:
+        raise RuntimeError((daemon.stderr or daemon.stdout).strip())
+
+    enabled = run_systemctl_user(["enable", "--now", "offline-downloader.timer"])
+    if enabled.returncode != 0:
+        raise RuntimeError((enabled.stderr or enabled.stdout).strip())
+
+
+def disable_user_timer():
+    stopped = run_systemctl_user(["disable", "--now", "offline-downloader.timer"])
+    if stopped.returncode != 0 and "does not exist" not in (stopped.stderr or ""):
+        raise RuntimeError((stopped.stderr or stopped.stdout).strip())
+
+    SYSTEMD_TIMER.unlink(missing_ok=True)
+    SYSTEMD_SERVICE.unlink(missing_ok=True)
+
+    daemon = run_systemctl_user(["daemon-reload"])
+    if daemon.returncode != 0:
+        raise RuntimeError((daemon.stderr or daemon.stdout).strip())
 
 
 def repo_name(repo_url):
@@ -449,6 +546,37 @@ class Downloader:
             self.status(f"Removed old file: {path.name}")
 
 
+def run_scheduled_check():
+    config = load_config()
+    if not scheduled_download_due(config):
+        print("Skipped — already current: scheduled download is not due")
+        return 0
+
+    items = [item for item in config.get("items", []) if item.get("enabled")]
+    if not items:
+        print("Complete: no enabled downloads")
+        mark_scheduled_run_complete(config)
+        return 0
+
+    downloader = Downloader(
+        config["save_root"],
+        lambda text: print(text, flush=True),
+        lambda _fraction=None, pulse=False: None,
+        dry_run=False,
+    )
+
+    for index, item in enumerate(items, start=1):
+        print(f"Item {index} of {len(items)}: {item['type']} {item['url']}", flush=True)
+        try:
+            downloader.run_item(item)
+        except Exception as exc:
+            print(f"Failed — {exc}", flush=True)
+
+    mark_scheduled_run_complete(config)
+    print("Complete", flush=True)
+    return 0
+
+
 class OfflineDownloaderApp(Gtk.Window):
     def __init__(self):
         super().__init__(title=APP_NAME)
@@ -508,6 +636,17 @@ class OfflineDownloaderApp(Gtk.Window):
 
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         outer.pack_start(toolbar, False, False, 0)
+
+        timer_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        outer.pack_start(timer_row, False, False, 0)
+
+        self.enable_timer_button = Gtk.Button(label="Enable Monthly Auto-Check")
+        self.enable_timer_button.connect("clicked", self.enable_monthly_auto_check)
+        timer_row.pack_start(self.enable_timer_button, False, False, 0)
+
+        self.disable_timer_button = Gtk.Button(label="Disable Monthly Auto-Check")
+        self.disable_timer_button.connect("clicked", self.disable_monthly_auto_check)
+        timer_row.pack_start(self.disable_timer_button, False, False, 0)
 
         self.add_github_button = Gtk.Button(label="Add GitHub Repo")
         self.add_github_button.connect("clicked", self.add_github)
@@ -656,7 +795,7 @@ class OfflineDownloaderApp(Gtk.Window):
     def start_dry_run(self, _button):
         self.start_queue(dry_run=True)
 
-    def start_queue(self, dry_run):
+    def start_queue(self, dry_run, mark_scheduled=False):
         if self.worker and self.worker.is_alive():
             self.set_status("Downloads are already running")
             return
@@ -674,14 +813,18 @@ class OfflineDownloaderApp(Gtk.Window):
         self.clear_status_log()
         mode = "dry run" if dry_run else "download"
         self.set_status(f"Starting {mode}")
-        self.worker = threading.Thread(target=self.download_worker, args=(items, dry_run), daemon=True)
+        self.worker = threading.Thread(
+            target=self.download_worker,
+            args=(items, dry_run, mark_scheduled),
+            daemon=True,
+        )
         self.worker.start()
 
     def cancel_downloads(self, _button):
         self.cancel_requested.set()
         self.set_status("Cancel requested — current item will finish first")
 
-    def download_worker(self, items, dry_run):
+    def download_worker(self, items, dry_run, mark_scheduled):
         downloader = Downloader(
             self.config["save_root"],
             lambda text: GLib.idle_add(self.set_status, text),
@@ -703,7 +846,7 @@ class OfflineDownloaderApp(Gtk.Window):
             except Exception as exc:
                 GLib.idle_add(self.set_status, f"Failed — {exc}")
 
-        GLib.idle_add(self.finish_downloads)
+        GLib.idle_add(self.finish_downloads, mark_scheduled)
 
     def set_status(self, text):
         self.status_label.set_text(text)
@@ -729,7 +872,10 @@ class OfflineDownloaderApp(Gtk.Window):
             self.progress_bar.set_fraction(float(fraction))
         return False
 
-    def finish_downloads(self):
+    def finish_downloads(self, mark_scheduled=False):
+        if mark_scheduled:
+            self.config["last_scheduled_run_date"] = datetime.date.today().isoformat()
+            save_config(self.config)
         self.progress_bar.set_fraction(1)
         self.set_controls_sensitive(True)
         self.cancel_button.set_sensitive(False)
@@ -742,6 +888,8 @@ class OfflineDownloaderApp(Gtk.Window):
             self.schedule_day,
             self.schedule_hour,
             self.schedule_minute,
+            self.enable_timer_button,
+            self.disable_timer_button,
             self.add_github_button,
             self.add_direct_button,
             self.remove_button,
@@ -751,18 +899,23 @@ class OfflineDownloaderApp(Gtk.Window):
         ]:
             widget.set_sensitive(sensitive)
 
+    def enable_monthly_auto_check(self, _button):
+        try:
+            self.save_from_ui()
+            enable_user_timer()
+            self.set_status("Complete: monthly auto-check enabled")
+        except Exception as exc:
+            self.set_status(f"Failed — {exc}")
+
+    def disable_monthly_auto_check(self, _button):
+        try:
+            disable_user_timer()
+            self.set_status("Complete: monthly auto-check disabled")
+        except Exception as exc:
+            self.set_status(f"Failed — {exc}")
+
     def show_schedule_prompt(self):
-        schedule = self.config.get("monthly_schedule", {})
-        now = datetime.datetime.now()
-        day = clamp(schedule.get("day"), 1, 28, 15)
-        hour = clamp(schedule.get("hour"), 0, 23, 2)
-        minute = clamp(schedule.get("minute"), 0, 59, 0)
-
-        if now.day != day:
-            return False
-
-        scheduled_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if now < scheduled_time:
+        if not scheduled_download_due(self.config):
             return False
 
         dialog = Gtk.MessageDialog(
@@ -777,11 +930,14 @@ class OfflineDownloaderApp(Gtk.Window):
         response = dialog.run()
         dialog.destroy()
         if response == Gtk.ResponseType.OK:
-            self.start_downloads(None)
+            self.start_queue(dry_run=False, mark_scheduled=True)
         return False
 
 
 if __name__ == "__main__":
+    if "--scheduled-check" in sys.argv:
+        raise SystemExit(run_scheduled_check())
+
     app = OfflineDownloaderApp()
     app.show_all()
     Gtk.main()

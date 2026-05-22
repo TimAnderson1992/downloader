@@ -21,6 +21,7 @@ The app is download-only. It does not install packages, run downloaded files, co
 - Start downloads manually with Download Now.
 - Preview work with Dry Run without changing files.
 - Cancel the queue after the current item finishes.
+- Enable or disable an optional systemd user timer for monthly auto-checks.
 - Show clear status messages.
 - Download only one item at a time.
 
@@ -45,3 +46,22 @@ User settings are stored locally at:
 ```
 
 That config file is not part of this repository.
+
+The config also stores `last_scheduled_run_date`, which prevents the scheduled check from running more than once for the same monthly due date.
+
+## Optional Systemd User Timer
+
+The GUI buttons `Enable Monthly Auto-Check` and `Disable Monthly Auto-Check` manage user-level systemd files only:
+
+```text
+~/.config/systemd/user/offline-downloader.service
+~/.config/systemd/user/offline-downloader.timer
+```
+
+No `sudo` is used. The timer periodically launches:
+
+```bash
+python3 offline_downloader_gui.py --scheduled-check
+```
+
+That headless check reads the saved monthly schedule and only starts downloads when the schedule is due and `last_scheduled_run_date` is not today. Downloads still run one item at a time.
