@@ -287,6 +287,54 @@ def natural_key(text):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"([0-9]+)", text)]
 
 
+COL_ENABLED = 0
+COL_NAME = 1
+COL_TYPE = 2
+COL_URL = 3
+COL_STATUS = 4
+COL_PROGRESS_VALUE = 5
+COL_PROGRESS_TEXT = 6
+
+STATUS_PREFIXES = (
+    "Waiting",
+    "Checking",
+    "Skipped — already current",
+    "Downloading — missing",
+    "Updating — newer version found",
+    "Complete",
+    "Failed —",
+    "Cancel pending",
+)
+
+
+def item_display_name(item):
+    item_type = item.get("type", "direct")
+    url = item.get("url", "")
+    if item_type == "github":
+        return repo_name(url)
+    if item_type == "linuxmint_iso" or is_linuxmint_download_page(url):
+        return "Linux Mint Cinnamon ISO"
+    if "visualstudio.com/sha/download" in url:
+        return "vscode-stable"
+    if "raspberrypi.org/imager" in url or "imager_latest" in url:
+        return "raspberry-pi-imager"
+    if "kiwix" in url.lower():
+        return "kiwix"
+    parsed = urllib.parse.urlparse(url)
+    name = Path(parsed.path).stem or parsed.netloc or "download"
+    return clean_folder_name(name)
+
+
+def progress_text(fraction):
+    if fraction is None:
+        return ""
+    return f"{int(max(0, min(1, fraction)) * 100)}%"
+
+
+def is_row_status(text):
+    return text.startswith(STATUS_PREFIXES)
+
+
 class Downloader:
     def __init__(self, save_root, status_cb, progress_cb, dry_run=False):
         self.save_root = Path(save_root).expanduser()
@@ -299,8 +347,8 @@ class Downloader:
     def status(self, text):
         self.status_cb(text)
 
-    def progress(self, fraction=None, pulse=False):
-        self.progress_cb(fraction, pulse)
+    def progress(self, fraction=None, pulse=False, detail=""):
+        self.progress_cb(fraction, pulse, detail)
 
     def run_item(self, item):
         item_type = item["type"]
@@ -478,7 +526,8 @@ class Downloader:
                 tmp.write(chunk)
                 downloaded += len(chunk)
                 if total_size:
-                    self.progress(min(downloaded / total_size, 1.0))
+                    fraction = min(downloaded / total_size, 1.0)
+                    self.progress(fraction, detail=f"{downloaded / 1048576:.1f} MB / {total_size / 1048576:.1f} MB")
                 else:
                     self.progress(pulse=True)
 
@@ -594,7 +643,7 @@ def run_scheduled_check():
     downloader = Downloader(
         config["save_root"],
         lambda text: print(text, flush=True),
-        lambda _fraction=None, pulse=False: None,
+        lambda _fraction=None, pulse=False, detail="": None,
         dry_run=False,
     )
 
@@ -617,8 +666,9 @@ class OfflineDownloaderApp(Gtk.Window):
         self.config = load_config()
         self.worker = None
         self.cancel_requested = threading.Event()
+        self.active_row_index = None
 
-        self.store = Gtk.ListStore(bool, str, str)
+        self.store = Gtk.ListStore(bool, str, str, str, str, int, str)
         self.build_ui()
         self.load_items()
         self.load_schedule()
@@ -715,24 +765,56 @@ class OfflineDownloaderApp(Gtk.Window):
 
         enabled_renderer = Gtk.CellRendererToggle()
         enabled_renderer.connect("toggled", self.on_enabled_toggled)
-        enabled_col = Gtk.TreeViewColumn("Enabled", enabled_renderer, active=0)
+        enabled_col = Gtk.TreeViewColumn("Enabled", enabled_renderer, active=COL_ENABLED)
         self.tree.append_column(enabled_col)
 
+        name_renderer = Gtk.CellRendererText()
+        name_col = Gtk.TreeViewColumn("Item", name_renderer, text=COL_NAME)
+        self.tree.append_column(name_col)
+
         type_renderer = Gtk.CellRendererText()
-        type_col = Gtk.TreeViewColumn("Type", type_renderer, text=1)
+        type_col = Gtk.TreeViewColumn("Type", type_renderer, text=COL_TYPE)
         self.tree.append_column(type_col)
 
         url_renderer = Gtk.CellRendererText()
         url_renderer.set_property("ellipsize", 3)
-        url_col = Gtk.TreeViewColumn("URL", url_renderer, text=2)
+        url_col = Gtk.TreeViewColumn("URL", url_renderer, text=COL_URL)
         url_col.set_expand(True)
         self.tree.append_column(url_col)
+
+        status_renderer = Gtk.CellRendererText()
+        status_col = Gtk.TreeViewColumn("Status", status_renderer, text=COL_STATUS)
+        status_col.set_min_width(220)
+        self.tree.append_column(status_col)
+
+        row_progress_renderer = Gtk.CellRendererProgress()
+        row_progress_col = Gtk.TreeViewColumn(
+            "Progress",
+            row_progress_renderer,
+            value=COL_PROGRESS_VALUE,
+            text=COL_PROGRESS_TEXT,
+        )
+        row_progress_col.set_min_width(140)
+        self.tree.append_column(row_progress_col)
 
         status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         outer.pack_start(status_box, False, False, 0)
 
-        self.progress_bar = Gtk.ProgressBar()
-        status_box.pack_start(self.progress_bar, False, False, 0)
+        self.overall_label = Gtk.Label(label="Overall: 0 of 0 complete")
+        self.overall_label.set_xalign(0)
+        status_box.pack_start(self.overall_label, False, False, 0)
+
+        self.overall_progress_bar = Gtk.ProgressBar()
+        self.overall_progress_bar.set_show_text(True)
+        status_box.pack_start(self.overall_progress_bar, False, False, 0)
+
+        self.current_item_label = Gtk.Label(label="Current item: none")
+        self.current_item_label.set_xalign(0)
+        status_box.pack_start(self.current_item_label, False, False, 0)
+
+        self.current_progress_bar = Gtk.ProgressBar()
+        self.current_progress_bar.set_show_text(True)
+        status_box.pack_start(self.current_progress_bar, False, False, 0)
 
         self.status_label = Gtk.Label(label="Ready")
         self.status_label.set_xalign(0)
@@ -751,7 +833,17 @@ class OfflineDownloaderApp(Gtk.Window):
     def load_items(self):
         self.store.clear()
         for item in self.config["items"]:
-            self.store.append([bool(item.get("enabled", True)), item.get("type", "direct"), item.get("url", "")])
+            self.store.append(
+                [
+                    bool(item.get("enabled", True)),
+                    item_display_name(item),
+                    item.get("type", "direct"),
+                    item.get("url", ""),
+                    "Waiting",
+                    0,
+                    "",
+                ]
+            )
 
     def load_schedule(self):
         schedule = self.config.get("monthly_schedule", {})
@@ -762,7 +854,7 @@ class OfflineDownloaderApp(Gtk.Window):
     def config_from_ui(self):
         items = []
         for row in self.store:
-            items.append({"enabled": bool(row[0]), "type": row[1], "url": row[2]})
+            items.append({"enabled": bool(row[COL_ENABLED]), "type": row[COL_TYPE], "url": row[COL_URL]})
         self.config["items"] = items
         filename = self.folder_button.get_filename()
         if filename:
@@ -784,7 +876,7 @@ class OfflineDownloaderApp(Gtk.Window):
         self.save_from_ui()
 
     def on_enabled_toggled(self, _renderer, path):
-        self.store[path][0] = not self.store[path][0]
+        self.store[path][COL_ENABLED] = not self.store[path][COL_ENABLED]
         self.save_from_ui()
 
     def add_github(self, _button):
@@ -812,7 +904,8 @@ class OfflineDownloaderApp(Gtk.Window):
         dialog.destroy()
 
         if response == Gtk.ResponseType.OK and url:
-            self.store.append([True, item_type, url])
+            item = {"enabled": True, "type": item_type, "url": url}
+            self.store.append([True, item_display_name(item), item_type, url, "Waiting", 0, ""])
             self.save_from_ui()
 
     def remove_selected(self, _button):
@@ -834,7 +927,21 @@ class OfflineDownloaderApp(Gtk.Window):
             return
 
         self.save_from_ui()
-        items = [item for item in self.config["items"] if item.get("enabled")]
+        items = []
+        for row_index, row in enumerate(self.store):
+            row[COL_STATUS] = "Waiting"
+            row[COL_PROGRESS_VALUE] = 0
+            row[COL_PROGRESS_TEXT] = ""
+            if row[COL_ENABLED]:
+                items.append(
+                    {
+                        "enabled": True,
+                        "name": row[COL_NAME],
+                        "type": row[COL_TYPE],
+                        "url": row[COL_URL],
+                        "row_index": row_index,
+                    }
+                )
         if not items:
             self.set_status("No enabled downloads")
             return
@@ -842,7 +949,11 @@ class OfflineDownloaderApp(Gtk.Window):
         self.cancel_requested.clear()
         self.set_controls_sensitive(False)
         self.cancel_button.set_sensitive(True)
-        self.progress_bar.set_fraction(0)
+        self.completed_items = 0
+        self.total_items = len(items)
+        self.update_overall_progress(0, self.total_items)
+        self.current_progress_bar.set_fraction(0)
+        self.current_progress_bar.set_text("")
         self.clear_status_log()
         mode = "dry run" if dry_run else "download"
         self.set_status(f"Starting {mode}")
@@ -855,13 +966,26 @@ class OfflineDownloaderApp(Gtk.Window):
 
     def cancel_downloads(self, _button):
         self.cancel_requested.set()
-        self.set_status("Cancel requested — current item will finish first")
+        self.set_status("Cancel pending")
+        for row in self.store:
+            if row[COL_ENABLED] and row[COL_STATUS] == "Waiting":
+                row[COL_STATUS] = "Cancel pending"
+        if self.valid_row_index(self.active_row_index):
+            self.store[self.active_row_index][COL_STATUS] = "Cancel pending"
 
     def download_worker(self, items, dry_run, mark_scheduled):
+        current = {"row_index": None}
         downloader = Downloader(
             self.config["save_root"],
-            lambda text: GLib.idle_add(self.set_status, text),
-            lambda fraction, pulse=False: GLib.idle_add(self.set_progress, fraction, pulse),
+            lambda text: GLib.idle_add(self.set_item_status, current["row_index"], text),
+            lambda fraction, pulse=False, detail="": GLib.idle_add(
+                self.set_item_progress,
+                current["row_index"],
+                fraction,
+                pulse,
+                detail,
+                dry_run,
+            ),
             dry_run=dry_run,
         )
 
@@ -870,14 +994,21 @@ class OfflineDownloaderApp(Gtk.Window):
             if self.cancel_requested.is_set():
                 GLib.idle_add(self.set_status, "Complete: canceled after current item")
                 break
+            current["row_index"] = item["row_index"]
             try:
                 GLib.idle_add(
-                    self.set_status,
-                    f"Item {index} of {total}: {item['type']} {item['url']}",
+                    self.start_item_progress,
+                    item["row_index"],
+                    item["name"],
+                    index,
+                    total,
+                    dry_run,
                 )
                 downloader.run_item(item)
+                GLib.idle_add(self.finish_item_progress, item["row_index"], index, total)
             except Exception as exc:
-                GLib.idle_add(self.set_status, f"Failed — {exc}")
+                GLib.idle_add(self.set_item_status, item["row_index"], f"Failed — {exc}")
+                GLib.idle_add(self.finish_item_progress, item["row_index"], index, total)
 
         GLib.idle_add(self.finish_downloads, mark_scheduled)
 
@@ -898,20 +1029,84 @@ class OfflineDownloaderApp(Gtk.Window):
     def clear_status_log(self):
         self.status_log.get_buffer().set_text("")
 
-    def set_progress(self, fraction, pulse=False):
+    def start_item_progress(self, row_index, name, index, total, dry_run):
+        self.current_item_label.set_text(f"Current item: {name}")
+        self.current_progress_bar.set_fraction(0)
+        self.current_progress_bar.set_text("")
+        self.update_overall_progress(index - 1, total)
+        if self.valid_row_index(row_index):
+            self.store[row_index][COL_STATUS] = "Checking"
+            self.store[row_index][COL_PROGRESS_VALUE] = 0
+            self.store[row_index][COL_PROGRESS_TEXT] = "" if dry_run else "Working"
+        self.active_row_index = row_index
+        self.set_status(f"Checking: {name}")
+        return False
+
+    def set_item_status(self, row_index, text):
+        self.status_label.set_text(text)
+        self.append_status_log(text)
+        if self.valid_row_index(row_index) and is_row_status(text):
+            self.store[row_index][COL_STATUS] = text
+            if text.startswith("Complete") or text.startswith("Skipped"):
+                self.store[row_index][COL_PROGRESS_VALUE] = 100
+                self.store[row_index][COL_PROGRESS_TEXT] = "Done"
+            elif text.startswith("Failed"):
+                self.store[row_index][COL_PROGRESS_TEXT] = "Failed"
+            elif text.startswith("Downloading") or text.startswith("Updating") or text.startswith("Checking"):
+                self.store[row_index][COL_PROGRESS_TEXT] = "Working"
+        return False
+
+    def set_item_progress(self, row_index, fraction, pulse=False, detail="", dry_run=False):
+        if dry_run:
+            return False
         if pulse:
-            self.progress_bar.pulse()
+            self.current_progress_bar.pulse()
+            if self.valid_row_index(row_index):
+                self.store[row_index][COL_PROGRESS_TEXT] = "Working"
         elif fraction is not None:
-            self.progress_bar.set_fraction(float(fraction))
+            fraction = max(0.0, min(1.0, float(fraction)))
+            percent = int(fraction * 100)
+            text = detail or f"{percent}%"
+            self.current_progress_bar.set_fraction(fraction)
+            self.current_progress_bar.set_text(text)
+            if self.valid_row_index(row_index):
+                self.store[row_index][COL_PROGRESS_VALUE] = percent
+                self.store[row_index][COL_PROGRESS_TEXT] = text
+        return False
+
+    def finish_item_progress(self, row_index, index, total):
+        if self.valid_row_index(row_index):
+            status = self.store[row_index][COL_STATUS]
+            if not str(status).startswith("Failed"):
+                self.store[row_index][COL_PROGRESS_VALUE] = 100
+                self.store[row_index][COL_PROGRESS_TEXT] = "Done"
+        self.update_overall_progress(index, total)
+        return False
+
+    def update_overall_progress(self, complete, total):
+        self.overall_label.set_text(f"Overall: {complete} of {total} complete")
+        self.overall_progress_bar.set_fraction((complete / total) if total else 0)
+        self.overall_progress_bar.set_text(f"{complete} / {total}" if total else "")
+        return False
+
+    def valid_row_index(self, row_index):
+        return row_index is not None and 0 <= row_index < len(self.store)
+
+    def set_progress(self, fraction, pulse=False, detail=""):
+        if pulse:
+            self.current_progress_bar.pulse()
+        elif fraction is not None:
+            self.current_progress_bar.set_fraction(float(fraction))
         return False
 
     def finish_downloads(self, mark_scheduled=False):
         if mark_scheduled:
             self.config["last_scheduled_run_date"] = datetime.date.today().isoformat()
             save_config(self.config)
-        self.progress_bar.set_fraction(1)
         self.set_controls_sensitive(True)
         self.cancel_button.set_sensitive(False)
+        self.active_row_index = None
+        self.current_item_label.set_text("Current item: none")
         self.set_status("Complete")
         return False
 
