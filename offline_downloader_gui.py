@@ -554,7 +554,9 @@ class Downloader:
                 downloaded += len(chunk)
                 if total_size:
                     fraction = min(downloaded / total_size, 1.0)
-                    self.progress(fraction, detail=f"{downloaded / 1048576:.1f} MB / {total_size / 1048576:.1f} MB")
+                    percent = int(fraction * 100)
+                    detail = f"{percent}% — {downloaded / 1048576:.1f} MB / {total_size / 1048576:.1f} MB"
+                    self.progress(fraction, detail=detail)
                 else:
                     self.progress(pulse=True)
 
@@ -821,7 +823,7 @@ class OfflineDownloaderApp(Gtk.Window):
             value=COL_PROGRESS_VALUE,
             text=COL_PROGRESS_TEXT,
         )
-        row_progress_col.set_min_width(140)
+        row_progress_col.set_min_width(240)
         self.tree.append_column(row_progress_col)
 
         status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -838,10 +840,6 @@ class OfflineDownloaderApp(Gtk.Window):
         self.current_item_label = Gtk.Label(label="Current item: none")
         self.current_item_label.set_xalign(0)
         status_box.pack_start(self.current_item_label, False, False, 0)
-
-        self.current_progress_bar = Gtk.ProgressBar()
-        self.current_progress_bar.set_show_text(True)
-        status_box.pack_start(self.current_progress_bar, False, False, 0)
 
         self.status_label = Gtk.Label(label="Ready")
         self.status_label.set_xalign(0)
@@ -979,8 +977,6 @@ class OfflineDownloaderApp(Gtk.Window):
         self.completed_items = 0
         self.total_items = len(items)
         self.update_overall_progress(0, self.total_items)
-        self.current_progress_bar.set_fraction(0)
-        self.current_progress_bar.set_text("")
         self.clear_status_log()
         mode = "dry run" if dry_run else "download"
         self.set_status(f"Starting {mode}")
@@ -1058,8 +1054,6 @@ class OfflineDownloaderApp(Gtk.Window):
 
     def start_item_progress(self, row_index, name, index, total, dry_run):
         self.current_item_label.set_text(f"Current item: {name}")
-        self.current_progress_bar.set_fraction(0)
-        self.current_progress_bar.set_text("")
         self.update_overall_progress(index - 1, total)
         if self.valid_row_index(row_index):
             self.store[row_index][COL_STATUS] = "Checking"
@@ -1087,15 +1081,12 @@ class OfflineDownloaderApp(Gtk.Window):
         if dry_run:
             return False
         if pulse:
-            self.current_progress_bar.pulse()
             if self.valid_row_index(row_index):
                 self.store[row_index][COL_PROGRESS_TEXT] = "Working"
         elif fraction is not None:
             fraction = max(0.0, min(1.0, float(fraction)))
             percent = int(fraction * 100)
             text = detail or f"{percent}%"
-            self.current_progress_bar.set_fraction(fraction)
-            self.current_progress_bar.set_text(text)
             if self.valid_row_index(row_index):
                 self.store[row_index][COL_PROGRESS_VALUE] = percent
                 self.store[row_index][COL_PROGRESS_TEXT] = text
@@ -1120,10 +1111,6 @@ class OfflineDownloaderApp(Gtk.Window):
         return row_index is not None and 0 <= row_index < len(self.store)
 
     def set_progress(self, fraction, pulse=False, detail=""):
-        if pulse:
-            self.current_progress_bar.pulse()
-        elif fraction is not None:
-            self.current_progress_bar.set_fraction(float(fraction))
         return False
 
     def finish_downloads(self, mark_scheduled=False):
