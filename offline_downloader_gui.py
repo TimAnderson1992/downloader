@@ -49,7 +49,7 @@ DEFAULT_DIRECT_URLS = [
 ]
 
 
-def default_config():
+def default_items():
     items = []
     for url in DEFAULT_REPOS:
         items.append({"enabled": True, "type": "github", "url": url})
@@ -62,6 +62,11 @@ def default_config():
             "url": "https://linuxmint.com/download_all.php",
         }
     )
+    return items
+
+
+def default_config():
+    items = default_items()
 
     return {
         "save_root": str(Path.home() / "OfflineDownloads"),
@@ -73,6 +78,21 @@ def default_config():
         "last_scheduled_run_date": "",
         "items": items,
     }
+
+
+def merge_default_items(config):
+    existing = {
+        (item.get("type"), item.get("url"))
+        for item in config.get("items", [])
+    }
+    added = False
+    for item in default_items():
+        key = (item.get("type"), item.get("url"))
+        if key not in existing:
+            config.setdefault("items", []).append(dict(item))
+            existing.add(key)
+            added = True
+    return added
 
 
 def ensure_download_dirs(save_root):
@@ -92,7 +112,9 @@ def ensure_download_dirs(save_root):
 
 def load_config():
     if not CONFIG_FILE.exists():
-        return default_config()
+        data = default_config()
+        save_config(data)
+        return data
     try:
         with CONFIG_FILE.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -104,7 +126,11 @@ def load_config():
     data.setdefault("monthly_schedule", defaults["monthly_schedule"])
     data.setdefault("last_scheduled_run_date", "")
     data.setdefault("items", defaults["items"])
-    data.pop("scheduled_days", None)
+    changed = merge_default_items(data)
+    if data.pop("scheduled_days", None) is not None:
+        changed = True
+    if changed:
+        save_config(data)
     return data
 
 
