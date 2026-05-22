@@ -3,6 +3,7 @@
 import datetime
 import email.utils
 import filecmp
+import gzip
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from gi.repository import GLib, Gtk
 
 
 APP_NAME = "Offline Downloader"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 APP_REPO_URL = "https://github.com/TimAnderson1992/downloader"
 APP_RELEASES_URL = f"{APP_REPO_URL}/releases"
 APP_LATEST_RELEASE_API = "https://api.github.com/repos/TimAnderson1992/downloader/releases/latest"
@@ -420,6 +421,10 @@ def is_linuxmint_download_page(url):
     return parsed.netloc in {"linuxmint.com", "www.linuxmint.com"} and parsed.path == "/download_all.php"
 
 
+def is_kiwix_desktop_page(url):
+    return url.rstrip("/") == "https://download.kiwix.org/release/kiwix-desktop"
+
+
 def natural_key(text):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"([0-9]+)", text)]
 
@@ -586,10 +591,9 @@ class Downloader:
             self.download_linuxmint_iso()
             return
 
-        if url.rstrip("/") == "https://download.kiwix.org/release/kiwix-desktop":
-            url = url + "/"
-
-        if url.endswith("/"):
+        if is_kiwix_desktop_page(url):
+            url = self.latest_kiwix_appimage(url)
+        elif url.endswith("/"):
             url = self.latest_kiwix_appimage(url)
 
         request = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
@@ -616,10 +620,9 @@ class Downloader:
             self.dry_run_linuxmint_iso()
             return
 
-        if url.rstrip("/") == "https://download.kiwix.org/release/kiwix-desktop":
-            url = url + "/"
-
-        if url.endswith("/"):
+        if is_kiwix_desktop_page(url):
+            url = self.latest_kiwix_appimage(url)
+        elif url.endswith("/"):
             url = self.latest_kiwix_appimage(url)
 
         request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": APP_NAME})
@@ -761,57 +764,52 @@ class Downloader:
         return True
 
     def latest_kiwix_appimage(self, page_url):
-        self.status("Checking newest Kiwix AppImage")
-        html = self.read_url(page_url)
-        matches = re.findall(r'kiwix-desktop[^"<> ]*x86_64\.AppImage', html)
-        if not matches:
-            raise RuntimeError("Could not detect Kiwix AppImage filename")
-        name = sorted(set(matches))[-1]
-        return urllib.parse.urljoin(page_url, name)
+        scan_page = page_url.rstrip("/") + "/"
+        self.status(f"Scanning Kiwix page: {scan_page}")
+        try:
+            html = self.read_url(scan_page)
+            hrefs = re.findall(r'href=["\']([^"\']+\.AppImage)["\']', html, flags=re.IGNORECASE)
+            names = re.findall(r'kiwix-desktop[^"\'<> ]*x86_64[^"\'<> ]*\.AppImage', html, flags=re.IGNORECASE)
+            candidates = list(hrefs) + names
+            candidates = [
+                candidate for candidate in candidates
+                if "x86_64" in candidate.lower() and candidate.lower().endswith(".appimage")
+            ]
+            if not candidates:
+                raise RuntimeError("no Linux x86_64 AppImage link found")
+
+            selected = sorted(set(candidates), key=natural_key)[-1]
+            filename = Path(urllib.parse.urlparse(selected).path).name or selected
+            final_url = urllib.parse.urljoin(scan_page, selected)
+            self.status(f"Found Kiwix AppImage: {filename}")
+            self.status(f"Selected Kiwix URL: {final_url}")
+            return final_url
+        except Exception as exc:
+            raise RuntimeError(f"Kiwix scan failed; page scanned: {scan_page}; reason: {exc}") from exc
 
     def download_linuxmint_iso(self):
         page_url = "https://linuxmint.com/download_all.php"
         out_dir = self.save_root / "isos" / "linuxmint"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        self.status("Checking newest Linux Mint Cinnamon 64-bit ISO")
-        html = self.read_url(page_url)
-        matches = re.findall(r'linuxmint-[0-9][^"\'<> ]+-cinnamon-64bit\.iso', html)
-        if not matches:
-            raise RuntimeError("Could not detect Linux Mint Cinnamon 64-bit ISO filename")
-
-        iso_name = sorted(set(matches), key=natural_key)[-1]
-        self.status(f"Found Linux Mint ISO: {iso_name}")
+        resolved = self.resolve_linuxmint_iso(page_url)
+        iso_name = resolved["filename"]
+        iso_url = resolved["url"]
         final_path = out_dir / iso_name
 
         if final_path.exists():
             self.status(f"Skipped — already current: {iso_name}")
             return
 
-        url_matches = re.findall(
-            r'https?://[^"\'<> ]+/linuxmint-[0-9][^"\'<> ]+-cinnamon-64bit\.iso',
-            html,
-        )
-        iso_url = next((url for url in url_matches if url.endswith(iso_name)), "")
-        if not iso_url:
-            relative_matches = re.findall(
-                r'href=["\']([^"\']*linuxmint-[0-9][^"\']+-cinnamon-64bit\.iso)["\']',
-                html,
-            )
-            iso_url = next(
-                (
-                    urllib.parse.urljoin(page_url, url)
-                    for url in relative_matches
-                    if url.endswith(iso_name)
-                ),
-                "",
-            )
-
-        if not iso_url:
-            raise RuntimeError("Could not detect a Linux Mint ISO download URL on the page")
-
         self.status(f"Downloading — missing: {iso_name}")
-        self.download_url_to_path(iso_url, final_path)
+        try:
+            self.download_url_to_path(iso_url, final_path)
+        except Exception as exc:
+            raise RuntimeError(
+                "Linux Mint download failed; "
+                f"page scanned: {page_url}; filename found: {iso_name}; "
+                f"final URL selected: {iso_url}; reason: {exc}"
+            ) from exc
         self.status(f"Complete: {iso_name}")
         self.trim_versions(out_dir, "linuxmint-*-cinnamon-64bit.iso", keep=2)
 
@@ -819,23 +817,106 @@ class Downloader:
         page_url = "https://linuxmint.com/download_all.php"
         out_dir = self.save_root / "isos" / "linuxmint"
 
-        self.status("Checking newest Linux Mint Cinnamon 64-bit ISO")
-        html = self.read_url(page_url)
-        matches = re.findall(r'linuxmint-[0-9][^"\'<> ]+-cinnamon-64bit\.iso', html)
-        if not matches:
-            raise RuntimeError("Could not detect Linux Mint Cinnamon 64-bit ISO filename")
-
-        iso_name = sorted(set(matches), key=natural_key)[-1]
-        self.status(f"Found Linux Mint ISO: {iso_name}")
+        resolved = self.resolve_linuxmint_iso(page_url)
+        iso_name = resolved["filename"]
         if (out_dir / iso_name).exists():
             self.status(f"Skipped — already current: {iso_name}")
         else:
             self.status(f"Downloading — missing: {iso_name}")
 
+    def resolve_linuxmint_iso(self, page_url):
+        self.status(f"Scanning Linux Mint page: {page_url}")
+        iso_name = "not found"
+        iso_url = ""
+        try:
+            html = self.read_url(page_url)
+            matches = re.findall(r'linuxmint-[0-9][^"\'<> ]+-cinnamon-64bit\.iso', html)
+            if matches:
+                iso_name = sorted(set(matches), key=natural_key)[-1]
+                self.status(f"Found Linux Mint ISO: {iso_name}")
+
+                iso_url = self.find_iso_url_in_html(page_url, html, iso_name)
+                if not iso_url:
+                    linked_pages = self.linuxmint_candidate_pages(page_url, html)
+                    for linked_page in linked_pages:
+                        self.status(f"Scanning Linux Mint linked page: {linked_page}")
+                        linked_html = self.read_url(linked_page)
+                        iso_url = self.find_iso_url_in_html(linked_page, linked_html, iso_name)
+                        if iso_url:
+                            break
+            else:
+                self.status("Linux Mint download_all.php did not expose an ISO filename; scanning official mirror index")
+                mirror = self.resolve_linuxmint_iso_from_official_mirror()
+                iso_name = mirror["filename"]
+                iso_url = mirror["url"]
+
+            if not iso_url:
+                raise RuntimeError("no real .iso mirror URL found")
+
+            self.status(f"Selected Linux Mint ISO URL: {iso_url}")
+            return {"filename": iso_name, "url": iso_url}
+        except Exception as exc:
+            raise RuntimeError(
+                "Linux Mint scan failed; "
+                f"page scanned: {page_url}; "
+                f"filename found: {iso_name}; "
+                f"final URL selected: {iso_url or 'not selected'}; "
+                f"reason: {exc}"
+            ) from exc
+
+    def resolve_linuxmint_iso_from_official_mirror(self):
+        root_url = "https://pub.linuxmint.io/stable/"
+        self.status(f"Scanning Linux Mint page: {root_url}")
+        root_html = self.read_url(root_url)
+        versions = re.findall(r'href=["\']([0-9][0-9.]+/)["\']', root_html)
+        versions = sorted(set(version.strip("/") for version in versions), key=natural_key, reverse=True)
+        for version in versions:
+            version_url = urllib.parse.urljoin(root_url, f"{version}/")
+            self.status(f"Scanning Linux Mint linked page: {version_url}")
+            html = self.read_url(version_url)
+            matches = re.findall(r'linuxmint-[0-9][^"\'<> ]+-cinnamon-64bit\.iso', html)
+            if not matches:
+                continue
+            iso_name = sorted(set(matches), key=natural_key)[-1]
+            iso_url = urllib.parse.urljoin(version_url, iso_name)
+            self.status(f"Found Linux Mint ISO: {iso_name}")
+            return {"filename": iso_name, "url": iso_url}
+        raise RuntimeError(f"no Cinnamon 64-bit ISO filename found in {root_url}")
+
+    def find_iso_url_in_html(self, base_url, html, iso_name):
+        absolute_matches = re.findall(
+            r'https?://[^"\'<> ]+/' + re.escape(iso_name),
+            html,
+        )
+        if absolute_matches:
+            return sorted(set(absolute_matches), key=natural_key)[-1]
+
+        relative_matches = re.findall(
+            r'href=["\']([^"\']*' + re.escape(iso_name) + r')["\']',
+            html,
+        )
+        if relative_matches:
+            return urllib.parse.urljoin(base_url, sorted(set(relative_matches), key=natural_key)[-1])
+        return ""
+
+    def linuxmint_candidate_pages(self, base_url, html):
+        hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.IGNORECASE)
+        candidates = []
+        for href in hrefs:
+            lower = href.lower()
+            if "edition.php" in lower or "download.php" in lower or "mirrors" in lower:
+                url = urllib.parse.urljoin(base_url, href)
+                if url not in candidates:
+                    candidates.append(url)
+        return candidates
+
     def read_url(self, url):
         request = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
         with urllib.request.urlopen(request, timeout=60) as response:
-            return response.read().decode("utf-8", errors="replace")
+            data = response.read()
+            if response.headers.get("Content-Encoding") == "gzip" or data[:2] == b"\x1f\x8b":
+                data = gzip.decompress(data)
+            return data.decode("utf-8", errors="replace")
 
     def download_url_to_path(self, url, final_path):
         request = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
