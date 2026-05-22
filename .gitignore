@@ -1,0 +1,36 @@
+# Downloaded data
+OfflineDownloads/
+github/
+packages/
+isos/
+vscode/
+firmware/
+appimages/
+*.download
+*.tmp
+*.part
+
+# Downloaded packages and large artifacts
+*.deb
+*.iso
+*.AppImage
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.xz
+
+# Python/cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local editor and OS files
+.DS_Store
+*.swp
+*~
+
+# Personal app config
+.config/offline-downloader/
+config.json

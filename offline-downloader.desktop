@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Offline Downloader
+Comment=Download-only offline backup manager
+Exec=/home/tim/offline_downloader.sh
+Icon=folder-download
+Terminal=false
+Categories=Network;
