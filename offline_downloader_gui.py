@@ -116,6 +116,42 @@ def merge_default_items(config):
     return added
 
 
+def github_url_without_git(url):
+    return url[:-4] if url.endswith(".git") else url
+
+
+def github_url_variants(url):
+    base = github_url_without_git(url)
+    return {base, f"{base}.git"}
+
+
+def normalize_default_github_items(config):
+    defaults_by_base = {
+        github_url_without_git(item["url"]): item
+        for item in default_items()
+        if item.get("type") == "github"
+    }
+    existing_by_base = {}
+    for item in config.get("items", []):
+        if item.get("type") == "github" and "github.com" in item.get("url", ""):
+            existing_by_base[github_url_without_git(item["url"])] = item
+
+    changed = False
+    for base, default in defaults_by_base.items():
+        existing = existing_by_base.get(base)
+        if existing:
+            if existing.get("enabled") is not True:
+                existing["enabled"] = True
+                changed = True
+            if existing.get("url") != default["url"]:
+                existing["url"] = default["url"]
+                changed = True
+        else:
+            config.setdefault("items", []).append(dict(default))
+            changed = True
+    return changed
+
+
 def ensure_download_dirs(save_root):
     root = Path(save_root).expanduser()
     for name in [
@@ -148,6 +184,8 @@ def load_config():
     data.setdefault("last_scheduled_run_date", "")
     data.setdefault("items", defaults["items"])
     changed = merge_default_items(data)
+    if normalize_default_github_items(data):
+        changed = True
     if data.pop("scheduled_days", None) is not None:
         changed = True
     if changed:
@@ -523,34 +561,60 @@ class Downloader:
 
     def sync_github(self, url):
         target = self.save_root / "github" / repo_name(url)
+        self.status(f"GitHub item: {target.name}")
+        self.status(f"GitHub repo URL: {url}")
+        self.status(f"GitHub destination folder: {target}")
         if not (target / ".git").exists():
+            self.status(f"GitHub action: clone {target.name}")
             self.status(f"Downloading — missing: {target.name}")
             self.progress(pulse=True)
-            self.run_git(["git", "clone", url, str(target)], cwd=self.save_root)
+            try:
+                self.run_git(["git", "clone", url, str(target)], cwd=self.save_root)
+            except Exception as exc:
+                self.status(f"Failed — GitHub clone failed for {target.name}: {exc}")
+                raise
             self.status(f"Complete: {target.name}")
+            self.status(f"GitHub success: cloned {target.name}")
             return
 
         self.status(f"Checking {target.name}")
+        self.status(f"GitHub action: fetch/pull check {target.name}")
         self.progress(pulse=True)
-        self.run_git(["git", "fetch"], cwd=target)
+        try:
+            self.run_git(["git", "fetch"], cwd=target)
+        except Exception as exc:
+            self.status(f"Failed — GitHub fetch failed for {target.name}: {exc}")
+            raise
 
         local = self.git_output(["git", "rev-parse", "HEAD"], cwd=target)
         upstream = self.git_output(["git", "rev-parse", "@{u}"], cwd=target)
 
         if local and upstream and local == upstream:
             self.status(f"Skipped — already current: {target.name}")
+            self.status(f"GitHub success: already current {target.name}")
             return
 
         self.status(f"Updating — newer version found: {target.name}")
-        self.run_git(["git", "pull", "--ff-only"], cwd=target)
+        self.status(f"GitHub action: pull {target.name}")
+        try:
+            self.run_git(["git", "pull", "--ff-only"], cwd=target)
+        except Exception as exc:
+            self.status(f"Failed — GitHub pull failed for {target.name}: {exc}")
+            raise
         self.status(f"Complete: {target.name}")
+        self.status(f"GitHub success: updated {target.name}")
 
     def dry_run_github(self, url):
         target = self.save_root / "github" / repo_name(url)
+        self.status(f"GitHub item: {target.name}")
+        self.status(f"GitHub repo URL: {url}")
+        self.status(f"GitHub destination folder: {target}")
         if not (target / ".git").exists():
+            self.status(f"GitHub dry run: would clone {url} to {target}")
             self.status(f"Downloading — missing: {target.name}")
             return
 
+        self.status(f"GitHub dry run: would check/pull {target}")
         local = self.git_output(["git", "rev-parse", "HEAD"], cwd=target)
         remote = self.git_output(["git", "ls-remote", url, "HEAD"], cwd=self.save_root)
         remote_head = remote.split()[0] if remote else ""
@@ -558,6 +622,7 @@ class Downloader:
         if local and remote_head and local == remote_head:
             self.status(f"Skipped — already current: {target.name}")
         elif remote_head:
+            self.status(f"GitHub dry run: would pull newer commits for {target.name}")
             self.status(f"Updating — newer version found: {target.name}")
         else:
             self.status(f"Failed — could not check remote HEAD: {target.name}")
@@ -976,6 +1041,7 @@ class OfflineDownloaderApp(Gtk.Window):
         self.load_items()
         self.load_schedule()
         self.connect("destroy", Gtk.main_quit)
+        GLib.idle_add(self.validate_download_items)
         GLib.idle_add(self.show_schedule_prompt)
 
     def build_ui(self):
@@ -1323,6 +1389,16 @@ class OfflineDownloaderApp(Gtk.Window):
 
     def clear_status_log(self):
         self.status_log.get_buffer().set_text("")
+
+    def validate_download_items(self):
+        for row in self.store:
+            item_type = row[COL_TYPE]
+            url = row[COL_URL]
+            if "github.com" in url and item_type not in {"github", "github_release"}:
+                self.set_status(
+                    f"Warning — GitHub URL has unexpected type '{item_type}': {url}"
+                )
+        return False
 
     def start_item_progress(self, row_index, name, index, total, dry_run):
         self.update_overall_progress(index - 1, total)
