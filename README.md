@@ -13,12 +13,19 @@ git clone https://github.com/TimAnderson1992/downloader.git
 cd downloader
 ```
 
+## Run From Source
+
+```bash
+./OfflineDownloader
+```
+
 ## Files
 
 - `OfflineDownloader` - executable launcher.
 - `offline_downloader_gui.py` - GTK GUI application.
 - `offline_downloader.sh` - launcher script.
 - `offline-downloader.desktop` - desktop launcher.
+- `build_deb.sh` - local Debian package build script.
 
 ## Features
 
@@ -41,10 +48,36 @@ The Linux Mint item uses `https://linuxmint.com/download_all.php` as a webpage t
 
 It finds the newest Linux Mint Cinnamon 64-bit ISO filename, downloads only the real `.iso` file, saves it under `isos/linuxmint/`, and keeps only the newest ISO plus the previous ISO after a successful new download.
 
-## Run
+## Build The .deb
 
 ```bash
-./OfflineDownloader
+./build_deb.sh
+```
+
+To set a package version:
+
+```bash
+VERSION=1.0.0 ./build_deb.sh
+```
+
+The build creates:
+
+```text
+offline-downloader_VERSION_amd64.deb
+```
+
+The package installs app files under `/opt/offline-downloader/`, the launcher at `/usr/bin/offline-downloader`, and the desktop file at `/usr/share/applications/offline-downloader.desktop`.
+
+## Install The .deb Manually
+
+```bash
+sudo apt install ./offline-downloader_VERSION_amd64.deb
+```
+
+After installing:
+
+```bash
+offline-downloader
 ```
 
 ## Config

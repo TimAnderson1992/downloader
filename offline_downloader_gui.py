@@ -21,6 +21,7 @@ from gi.repository import GLib, Gtk
 
 
 APP_NAME = "Offline Downloader"
+APP_REPO_URL = "https://github.com/TimAnderson1992/downloader"
 CONFIG_DIR = Path.home() / ".config" / "offline-downloader"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -197,6 +198,10 @@ def run_systemctl_user(args):
     )
 
 
+def app_base_dir():
+    return Path(__file__).resolve().parent
+
+
 def enable_user_timer():
     script_path = Path(__file__).resolve()
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
@@ -240,6 +245,57 @@ def enable_user_timer():
     enabled = run_systemctl_user(["enable", "--now", "offline-downloader.timer"])
     if enabled.returncode != 0:
         raise RuntimeError((enabled.stderr or enabled.stdout).strip())
+
+
+def git_app_output(args):
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(app_base_dir()),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def app_running_from_git_clone():
+    result = git_app_output(["rev-parse", "--is-inside-work-tree"])
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def app_git_update_status():
+    if not app_running_from_git_clone():
+        return {"git_clone": False}
+
+    remote_result = git_app_output(["remote", "get-url", "origin"])
+    remote_url = remote_result.stdout.strip() if remote_result.returncode == 0 else ""
+    if "github.com" not in remote_url or "TimAnderson1992/downloader" not in remote_url:
+        return {"git_clone": True, "wrong_remote": remote_url}
+
+    fetch_result = git_app_output(["fetch", "origin", "main"])
+    if fetch_result.returncode != 0:
+        raise RuntimeError((fetch_result.stderr or fetch_result.stdout).strip())
+
+    local_result = git_app_output(["rev-parse", "HEAD"])
+    remote_head_result = git_app_output(["rev-parse", "origin/main"])
+    if local_result.returncode != 0 or remote_head_result.returncode != 0:
+        raise RuntimeError("Could not compare local app version with origin/main")
+
+    local_head = local_result.stdout.strip()
+    remote_head = remote_head_result.stdout.strip()
+    return {
+        "git_clone": True,
+        "remote_url": remote_url,
+        "local_head": local_head,
+        "remote_head": remote_head,
+        "update_available": local_head != remote_head,
+    }
+
+
+def pull_app_update():
+    pull_result = git_app_output(["pull", "--ff-only", "origin", "main"])
+    if pull_result.returncode != 0:
+        raise RuntimeError((pull_result.stderr or pull_result.stdout).strip())
+    return pull_result.stdout.strip()
 
 
 def disable_user_timer():
@@ -865,6 +921,10 @@ class OfflineDownloaderApp(Gtk.Window):
         self.disable_timer_button.connect("clicked", self.disable_monthly_auto_check)
         timer_row.pack_start(self.disable_timer_button, False, False, 0)
 
+        self.check_app_updates_button = Gtk.Button(label="Check for App Updates")
+        self.check_app_updates_button.connect("clicked", self.check_for_app_updates)
+        timer_row.pack_start(self.check_app_updates_button, False, False, 0)
+
         self.add_github_button = Gtk.Button(label="Add GitHub Repo")
         self.add_github_button.connect("clicked", self.add_github)
         toolbar.pack_start(self.add_github_button, False, False, 0)
@@ -1240,6 +1300,7 @@ class OfflineDownloaderApp(Gtk.Window):
             self.schedule_minute,
             self.enable_timer_button,
             self.disable_timer_button,
+            self.check_app_updates_button,
             self.add_github_button,
             self.add_direct_button,
             self.remove_button,
@@ -1263,6 +1324,67 @@ class OfflineDownloaderApp(Gtk.Window):
             self.set_status("Complete: monthly auto-check disabled")
         except Exception as exc:
             self.set_status(f"Failed — {exc}")
+
+    def check_for_app_updates(self, _button):
+        try:
+            status = app_git_update_status()
+            if not status.get("git_clone"):
+                self.show_info_dialog(
+                    "App update check",
+                    "This copy is not running from a git clone. Download package updates manually from https://github.com/TimAnderson1992/downloader.",
+                )
+                self.set_status("Complete: app update check finished")
+                return
+
+            if status.get("wrong_remote"):
+                self.show_info_dialog(
+                    "App update check",
+                    f"This git checkout does not use the expected app remote:\n{status['wrong_remote']}",
+                )
+                self.set_status("Failed — app git remote is not the Offline Downloader repo")
+                return
+
+            if not status.get("update_available"):
+                self.show_info_dialog("App update check", "Offline Downloader is already current.")
+                self.set_status("Offline Downloader is already current.")
+                return
+
+            if self.ask_yes_no("Update available", "Update Offline Downloader from origin/main now?"):
+                output = pull_app_update()
+                self.show_info_dialog("App update complete", output or "Offline Downloader was updated.")
+                self.set_status("Complete: app update applied")
+            else:
+                self.set_status("Complete: app update skipped")
+        except Exception as exc:
+            self.show_info_dialog("App update failed", str(exc))
+            self.set_status(f"Failed — {exc}")
+
+    def ask_yes_no(self, title, message):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=title,
+        )
+        dialog.format_secondary_text(message)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Update", Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.OK
+
+    def show_info_dialog(self, title, message):
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=title,
+        )
+        dialog.format_secondary_text(message)
+        dialog.run()
+        dialog.destroy()
 
     def show_schedule_prompt(self):
         if not scheduled_download_due(self.config):

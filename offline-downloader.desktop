@@ -2,7 +2,7 @@
 Type=Application
 Name=Offline Downloader
 Comment=Download-only offline backup manager
-Exec=/home/tim/offline_downloader.sh
+Exec=offline-downloader
 Icon=folder-download
 Terminal=false
 Categories=Network;

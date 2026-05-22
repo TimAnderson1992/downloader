@@ -6,6 +6,9 @@ isos/
 vscode/
 firmware/
 appimages/
+build/
+dist/
+pkgroot/
 *.download
 *.tmp
 *.part
