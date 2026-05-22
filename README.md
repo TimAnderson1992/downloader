@@ -15,6 +15,7 @@ cd downloader
 
 ## Files
 
+- `OfflineDownloader` - executable launcher.
 - `offline_downloader_gui.py` - GTK GUI application.
 - `offline_downloader.sh` - launcher script.
 - `offline-downloader.desktop` - desktop launcher.
@@ -43,7 +44,7 @@ It finds the newest Linux Mint Cinnamon 64-bit ISO filename, downloads only the 
 ## Run
 
 ```bash
-./offline_downloader.sh
+./OfflineDownloader
 ```
 
 ## Config
